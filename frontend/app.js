@@ -14,10 +14,28 @@ const CHI_SCALE = 0.5;
 const GAUGE_HEIGHT_CHI = 40;
 const RULER_LENGTH_CHI = 120;
 
+function isMobileDevice() {
+    if (typeof navigator !== 'undefined') {
+        return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+               (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    }
+    return false;
+}
+
+function getDeviceTier() {
+    const mobile = isMobileDevice();
+    const cores = navigator.hardwareConcurrency || 4;
+    const dpr = window.devicePixelRatio || 1;
+    if (mobile || cores <= 4 || dpr >= 2.5) return 'low';
+    if (cores <= 6 || dpr >= 2) return 'medium';
+    return 'high';
+}
+
 function initThreeJS() {
     const container = document.getElementById('three-container');
     const width = container.clientWidth;
     const height = container.clientHeight;
+    const tier = getDeviceTier();
 
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0a1a);
@@ -27,30 +45,46 @@ function initThreeJS() {
     camera.position.set(60, 50, 80);
     camera.lookAt(0, 10, 0);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    const tierConfig = {
+        low:    { shadow: 1024, dpr: Math.min(window.devicePixelRatio, 1.5), aa: false, bias: -0.0008 },
+        medium: { shadow: 2048, dpr: Math.min(window.devicePixelRatio, 2.0), aa: true,  bias: -0.0005 },
+        high:   { shadow: 4096, dpr: Math.min(window.devicePixelRatio, 2.5), aa: true,  bias: -0.0003 },
+    }[tier];
+
+    renderer = new THREE.WebGLRenderer({
+        antialias: tierConfig.aa,
+        alpha: false,
+        powerPreference: "high-performance",
+    });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(tierConfig.dpr);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.1;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.insertBefore(renderer.domElement, container.firstChild);
 
-    const ambientLight = new THREE.AmbientLight(0x404050, 0.4);
+    const ambientLight = new THREE.AmbientLight(0x404050, 0.5);
     scene.add(ambientLight);
 
-    const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x443322, 0.3);
+    const hemiLight = new THREE.HemisphereLight(0xfff1d6, 0x443322, 0.45);
     scene.add(hemiLight);
 
-    sunLight = new THREE.DirectionalLight(0xfff5d4, 1.5);
+    sunLight = new THREE.DirectionalLight(0xfff0c8, 1.8);
     sunLight.position.set(50, 60, -30);
     sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 2048;
-    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.mapSize.width = tierConfig.shadow;
+    sunLight.shadow.mapSize.height = tierConfig.shadow;
     sunLight.shadow.camera.near = 0.5;
-    sunLight.shadow.camera.far = 300;
-    sunLight.shadow.camera.left = -100;
-    sunLight.shadow.camera.right = 100;
-    sunLight.shadow.camera.top = 100;
-    sunLight.shadow.camera.bottom = -100;
+    sunLight.shadow.camera.far = 350;
+    sunLight.shadow.camera.left = -110;
+    sunLight.shadow.camera.right = 110;
+    sunLight.shadow.camera.top = 110;
+    sunLight.shadow.camera.bottom = -110;
+    sunLight.shadow.bias = tierConfig.bias;
+    sunLight.shadow.normalBias = tier === 'low' ? 0.04 : 0.06;
+    sunLight.shadow.radius = tier === 'low' ? 2 : tier === 'medium' ? 4 : 6;
     scene.add(sunLight);
 
     createGround();
@@ -389,19 +423,55 @@ function drawShadowCanvas() {
         const shadowStartX = gaugeX + gaugeW / 2;
         const shadowEndX = Math.min(shadowStartX + shadowPx, w - 10);
 
-        const shadowGrad = shadowCtx.createLinearGradient(shadowStartX, groundY, shadowEndX, groundY);
-        shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.85)');
-        shadowGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.5)');
-        shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0.15)');
-        shadowCtx.fillStyle = shadowGrad;
-        shadowCtx.fillRect(shadowStartX, groundY - 1, shadowEndX - shadowStartX, 25);
+        const pcfLayers = [
+            { dx: 0, dy: 0, a: 0.35, yOff: 0 },
+            { dx: 0.8, dy: 0.4, a: 0.12, yOff: 1 },
+            { dx: -0.8, dy: -0.4, a: 0.12, yOff: -1 },
+            { dx: 0.6, dy: -0.5, a: 0.10, yOff: 0 },
+            { dx: -0.6, dy: 0.5, a: 0.10, yOff: 1 },
+            { dx: 1.2, dy: 0, a: 0.09, yOff: 1 },
+            { dx: -1.2, dy: 0, a: 0.09, yOff: -1 },
+            { dx: 0, dy: 1.0, a: 0.08, yOff: 2 },
+        ];
+        pcfLayers.forEach(layer => {
+            const sx = shadowStartX + layer.dx * 2;
+            const ex = shadowEndX + layer.dx * 3;
+            const gy = groundY + layer.yOff;
+            const sh = 25 + Math.abs(layer.dy) * 4;
+            const sg = shadowCtx.createLinearGradient(sx, gy, ex, gy);
+            sg.addColorStop(0, `rgba(0, 0, 0, ${0.85 * layer.a * 3})`);
+            sg.addColorStop(0.5, `rgba(0, 0, 0, ${0.5 * layer.a * 3})`);
+            sg.addColorStop(1, `rgba(0, 0, 0, ${0.15 * layer.a * 3})`);
+            shadowCtx.fillStyle = sg;
+            shadowCtx.fillRect(sx, gy - 1, ex - sx, sh);
+        });
+
+        shadowCtx.save();
+        shadowCtx.filter = 'blur(1.5px)';
+        const sg = shadowCtx.createLinearGradient(shadowStartX, groundY, shadowEndX, groundY);
+        sg.addColorStop(0, 'rgba(0, 0, 0, 0.55)');
+        sg.addColorStop(0.5, 'rgba(0, 0, 0, 0.3)');
+        sg.addColorStop(1, 'rgba(0, 0, 0, 0.08)');
+        shadowCtx.fillStyle = sg;
+        shadowCtx.fillRect(shadowStartX, groundY, shadowEndX - shadowStartX, 25);
+        shadowCtx.restore();
 
         const alt = currentMeasurement.sun_altitude;
         const topY = groundY - gaugeH;
         const rayLen = shadowEndX - gaugeX;
         const endY = groundY - gaugeH - rayLen * Math.tan(alt * Math.PI / 180);
 
-        shadowCtx.strokeStyle = 'rgba(255, 220, 100, 0.4)';
+        shadowCtx.save();
+        shadowCtx.strokeStyle = 'rgba(255, 230, 130, 0.15)';
+        shadowCtx.lineWidth = 6;
+        shadowCtx.lineCap = 'round';
+        shadowCtx.beginPath();
+        shadowCtx.moveTo(gaugeX, topY);
+        shadowCtx.lineTo(shadowEndX, groundY);
+        shadowCtx.stroke();
+        shadowCtx.restore();
+
+        shadowCtx.strokeStyle = 'rgba(255, 220, 100, 0.45)';
         shadowCtx.lineWidth = 2;
         shadowCtx.setLineDash([5, 5]);
         shadowCtx.beginPath();
@@ -411,44 +481,86 @@ function drawShadowCanvas() {
         shadowCtx.setLineDash([]);
 
         if (showLabels) {
-            shadowCtx.fillStyle = 'rgba(255, 220, 100, 0.9)';
-            shadowCtx.font = 'bold 13px Consolas';
+            shadowCtx.save();
+            shadowCtx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+            shadowCtx.shadowBlur = 3;
+            shadowCtx.shadowOffsetX = 1;
+            shadowCtx.shadowOffsetY = 1;
+            shadowCtx.fillStyle = 'rgba(255, 225, 120, 0.95)';
+            shadowCtx.font = 'bold 13px Consolas, "Microsoft YaHei", monospace';
+            shadowCtx.textBaseline = 'alphabetic';
             shadowCtx.fillText(`影长: ${shadowLen.toFixed(2)} 尺 (${(shadowLen * 10).toFixed(1)} 寸)`, shadowStartX + 10, groundY - 8);
             shadowCtx.fillText(`太阳高度: ${alt.toFixed(2)}°`, shadowStartX + 10, groundY + 42);
+            shadowCtx.restore();
 
+            shadowCtx.save();
+            shadowCtx.lineCap = 'round';
+            shadowCtx.lineJoin = 'round';
             shadowCtx.beginPath();
             shadowCtx.moveTo(gaugeX, topY);
             shadowCtx.arc(gaugeX, topY, 30, Math.PI / 2, Math.PI / 2 + (90 - alt) * Math.PI / 180, false);
-            shadowCtx.strokeStyle = 'rgba(201, 169, 89, 0.8)';
+            shadowCtx.strokeStyle = 'rgba(201, 169, 89, 0.35)';
+            shadowCtx.lineWidth = 6;
+            shadowCtx.stroke();
+            shadowCtx.strokeStyle = 'rgba(201, 169, 89, 0.9)';
             shadowCtx.lineWidth = 2;
             shadowCtx.stroke();
+            shadowCtx.restore();
 
-            shadowCtx.fillStyle = '#c9a959';
+            shadowCtx.save();
+            shadowCtx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+            shadowCtx.shadowBlur = 2;
+            shadowCtx.fillStyle = '#d4b866';
             shadowCtx.font = 'bold 12px Consolas';
             shadowCtx.fillText(`${alt.toFixed(1)}°`, gaugeX + 35, topY + 15);
+            shadowCtx.restore();
 
-            shadowCtx.fillStyle = '#ff6b6b';
+            shadowCtx.save();
+            shadowCtx.beginPath();
+            shadowCtx.arc(shadowEndX, groundY, 8, 0, Math.PI * 2);
+            shadowCtx.fillStyle = 'rgba(255, 107, 107, 0.25)';
+            shadowCtx.fill();
             shadowCtx.beginPath();
             shadowCtx.arc(shadowEndX, groundY, 5, 0, Math.PI * 2);
+            shadowCtx.fillStyle = '#ff6b6b';
+            shadowCtx.shadowColor = 'rgba(255, 107, 107, 0.8)';
+            shadowCtx.shadowBlur = 5;
             shadowCtx.fill();
+            shadowCtx.restore();
 
-            shadowCtx.strokeStyle = '#ff6b6b';
-            shadowCtx.lineWidth = 1;
+            shadowCtx.save();
+            shadowCtx.strokeStyle = 'rgba(255, 107, 107, 0.3)';
+            shadowCtx.lineWidth = 3;
+            shadowCtx.lineCap = 'round';
             shadowCtx.beginPath();
             shadowCtx.moveTo(shadowEndX, groundY);
             shadowCtx.lineTo(shadowEndX, groundY - 35);
             shadowCtx.stroke();
+            shadowCtx.strokeStyle = '#ff6b6b';
+            shadowCtx.lineWidth = 1;
+            shadowCtx.stroke();
+            shadowCtx.restore();
 
-            shadowCtx.fillStyle = '#ff6b6b';
+            shadowCtx.save();
+            shadowCtx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+            shadowCtx.shadowBlur = 2;
+            shadowCtx.fillStyle = '#ff7b7b';
             shadowCtx.font = 'bold 11px Consolas';
-            shadowCtx.fillText(`影端`, shadowEndX - 12, groundY - 40);
+            shadowCtx.textAlign = 'center';
+            shadowCtx.fillText(`影端`, shadowEndX, groundY - 40);
+            shadowCtx.textAlign = 'start';
+            shadowCtx.restore();
         }
     }
 
-    shadowCtx.fillStyle = 'rgba(201, 169, 89, 0.9)';
-    shadowCtx.font = 'bold 11px Consolas';
+    shadowCtx.save();
+    shadowCtx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+    shadowCtx.shadowBlur = 2;
+    shadowCtx.fillStyle = 'rgba(201, 169, 89, 0.95)';
+    shadowCtx.font = 'bold 11px Consolas, "Microsoft YaHei"';
     shadowCtx.fillText('圭(表高40尺)', gaugeX - 35, groundY - gaugeH - 10);
     shadowCtx.fillText('圭尺', w * 0.6, groundY + 38);
+    shadowCtx.restore();
 }
 
 function updateMeasurementUI(m) {

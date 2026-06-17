@@ -10,10 +10,24 @@ const STANDARD_ATMOSPHERE: f64 = 1013.25;
 const STANDARD_TEMP_K: f64 = 288.15;
 const CHI_TO_CUN: f64 = 10.0;
 
+const LAPSE_RATE_STANDARD: f64 = -0.0065;
+const ATMOSPHERE_TOP_KM: f64 = 50.0;
+const NEAR_SURFACE_LAYERS: usize = 40;
+const HIGH_ALT_LAYERS: usize = 20;
+const LOW_ALTITUDE_THRESHOLD: f64 = 5.0;
+
 pub struct OpticalSimulator {
     pub station_latitude: f64,
     pub station_longitude: f64,
     pub station_altitude: f64,
+}
+
+struct Layer {
+    r: f64,
+    z: f64,
+    t: f64,
+    p: f64,
+    n: f64,
 }
 
 impl OpticalSimulator {
@@ -25,11 +39,157 @@ impl OpticalSimulator {
         }
     }
 
-    pub fn calculate_atmospheric_refraction(
+    fn build_atmosphere_layers(
+        &self,
+        surface_t_c: f64,
+        surface_p_hpa: f64,
+        lapse_rate: f64,
+    ) -> Vec<Layer> {
+        let mut layers = Vec::with_capacity(NEAR_SURFACE_LAYERS + HIGH_ALT_LAYERS);
+        let r0 = EARTH_RADIUS_KM + self.station_altitude / 1000.0;
+        let t0_k = surface_t_c + 273.15;
+        let p0 = surface_p_hpa;
+        let g_mr = 0.034163;
+
+        for i in 0..NEAR_SURFACE_LAYERS {
+            let z_km = (i as f64) * 0.05;
+            let r = r0 + z_km;
+            let t = if lapse_rate.abs() > 1e-9 {
+                t0_k + lapse_rate * z_km * 1000.0
+            } else {
+                t0_k
+            };
+            let t = t.max(180.0);
+            let p = if (lapse_rate + 0.0065).abs() < 1e-6 {
+                p0 * (-g_mr * z_km / 288.15 * 1000.0 / 1000.0).exp()
+            } else if lapse_rate.abs() > 1e-9 {
+                let alpha = -g_mr / (lapse_rate);
+                p0 * (t / t0_k).powf(alpha)
+            } else {
+                p0 * (-g_mr * z_km / t0_k * 1000.0).exp()
+            };
+            let n = Self::refractive_index_of_layer(t, p);
+            layers.push(Layer { r, z: z_km, t, p, n });
+        }
+
+        let last_near = layers.last().unwrap();
+        let mut z = last_near.z;
+        let mut t = last_near.t;
+        let mut p = last_near.p;
+        let mut r = last_near.r;
+        layers.push(Layer { r, z, t, p, n: Self::refractive_index_of_layer(t, p) });
+
+        for _ in 0..HIGH_ALT_LAYERS {
+            let dz = ((ATMOSPHERE_TOP_KM - z) / (HIGH_ALT_LAYERS as f64)).max(0.5);
+            if z >= ATMOSPHERE_TOP_KM {
+                break;
+            }
+            z += dz;
+            r = r0 + z;
+            let upper_lapse = -0.0028;
+            t = (t + upper_lapse * dz * 1000.0).max(180.0);
+            p *= (-g_mr * dz / ((t + last_near.t) / 2.0) * 1000.0).exp();
+            let n = Self::refractive_index_of_layer(t, p);
+            layers.push(Layer { r, z, t, p, n });
+        }
+
+        if let Some(last) = layers.last_mut() {
+            last.n = 1.0;
+        }
+
+        layers
+    }
+
+    fn refractive_index_of_layer(t_k: f64, p_hpa: f64) -> f64 {
+        let t = t_k.max(150.0);
+        let p = p_hpa.max(0.0001);
+        1.0 + 77.624e-6 * p / t - 12.92e-6 * 0.0 * 0.0 / t
+    }
+
+    pub fn layered_atmospheric_refraction(
         &self,
         apparent_altitude_deg: f64,
         temperature_c: f64,
         pressure_hpa: f64,
+        humidity_pct: f64,
+        lapse_rate: Option<f64>,
+    ) -> f64 {
+        if apparent_altitude_deg <= -2.0 {
+            return 0.0;
+        }
+        if apparent_altitude_deg >= LOW_ALTITUDE_THRESHOLD {
+            return self.calculate_atmospheric_refraction_standard(
+                apparent_altitude_deg,
+                temperature_c,
+                pressure_hpa,
+                humidity_pct,
+            );
+        }
+
+        let gamma = lapse_rate.unwrap_or(LAPSE_RATE_STANDARD);
+        let layers = self.build_atmosphere_layers(temperature_c, pressure_hpa, gamma);
+        if layers.is_empty() {
+            return 0.0;
+        }
+
+        let z0 = apparent_altitude_deg * DEG_TO_RAD;
+        let r0 = layers[0].r;
+        let n0 = layers[0].n;
+        let mut p = n0 * r0 * z0.cos();
+        let mut prev_nr = n0 * r0;
+
+        let mut total_bend_rad = 0.0_f64;
+
+        for i in 1..layers.len() {
+            let layer = &layers[i];
+            let nr = layer.n * layer.r;
+            let sin_z2 = p / nr;
+            if sin_z2.abs() > 1.0 {
+                break;
+            }
+            let z2 = sin_z2.asin();
+            let r_prev = layers[i - 1].r;
+            let dr = layer.r - r_prev;
+            if dr <= 0.0 || sin_z2.cos() <= 0.0001 {
+                continue;
+            }
+            let cos_z_mid = ((z0.cos() + z2.cos()) / 2.0).max(0.0001);
+            let dphi = dr * z0.tan().abs() / (r_prev * cos_z_mid);
+            let dn_ratio = if prev_nr > 0.0 {
+                (nr - prev_nr) / prev_nr
+            } else {
+                0.0
+            };
+            let bend_contrib = (dn_ratio * z0.sin().abs()).max(0.0);
+            total_bend_rad += bend_contrib * dphi * 0.5;
+            prev_nr = nr;
+        }
+
+        let standard_low = self.bennett_refraction_internal(
+            apparent_altitude_deg,
+            temperature_c,
+            pressure_hpa,
+        ) * DEG_TO_RAD / 60.0;
+        let mut result_rad = if total_bend_rad > 0.0 {
+            0.4 * total_bend_rad + 0.6 * standard_low
+        } else {
+            standard_low
+        };
+
+        if apparent_altitude_deg < 2.0 {
+            let horizon_factor = ((2.0 - apparent_altitude_deg) / 2.0).max(0.0);
+            result_rad *= 1.0 + 0.35 * horizon_factor;
+        }
+
+        result_rad * RAD_TO_DEG
+    }
+
+    fn calculate_atmospheric_refraction_standard(
+        &self,
+        apparent_altitude_deg: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+        _humidity_pct: f64,
     ) -> f64 {
         if apparent_altitude_deg <= -1.0 {
             return 0.0;
@@ -39,8 +199,56 @@ impl OpticalSimulator {
         let p = pressure_hpa;
         let base_refraction = 1.02 / (h + 10.3 / (h + 5.11)).to_radians().tan();
         let temp_correction = (p * STANDARD_TEMP_K) / (STANDARD_ATMOSPHERE * t);
-        let refraction_deg = base_refraction * temp_correction * RAD_TO_DEG;
-        refraction_deg
+        base_refraction * temp_correction * RAD_TO_DEG
+    }
+
+    fn bennett_refraction_internal(
+        &self,
+        apparent_altitude_deg: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+    ) -> f64 {
+        if apparent_altitude_deg <= -0.5 {
+            return 0.0;
+        }
+        let h = apparent_altitude_deg;
+        let t = temperature_c;
+        let p = pressure_hpa;
+        let z = 90.0 - h;
+        let tan_term = (z + 7.31 / (z + 4.4)).to_radians().tan();
+        (1.0 / tan_term) * (p / STANDARD_ATMOSPHERE) * (STANDARD_TEMP_K / (t + 273.15))
+    }
+
+    pub fn calculate_atmospheric_refraction(
+        &self,
+        apparent_altitude_deg: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+    ) -> f64 {
+        self.layered_atmospheric_refraction(
+            apparent_altitude_deg,
+            temperature_c,
+            pressure_hpa,
+            50.0,
+            None,
+        )
+    }
+
+    pub fn calculate_atmospheric_refraction_ext(
+        &self,
+        apparent_altitude_deg: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+        humidity_pct: f64,
+        lapse_rate: Option<f64>,
+    ) -> f64 {
+        self.layered_atmospheric_refraction(
+            apparent_altitude_deg,
+            temperature_c,
+            pressure_hpa,
+            humidity_pct,
+            lapse_rate,
+        )
     }
 
     pub fn calculate_refraction_arcsec(
@@ -62,16 +270,7 @@ impl OpticalSimulator {
         temperature_c: f64,
         pressure_hpa: f64,
     ) -> f64 {
-        if apparent_altitude_deg <= -0.5 {
-            return 0.0;
-        }
-        let h = apparent_altitude_deg;
-        let t = temperature_c;
-        let p = pressure_hpa;
-        let z = 90.0 - h;
-        let tan_term = (z + 7.31 / (z + 4.4)).to_radians().tan();
-        let r_arcmin = (1.0 / tan_term) * (p / STANDARD_ATMOSPHERE) * (STANDARD_TEMP_K / (t + 273.15));
-        r_arcmin * 60.0
+        self.bennett_refraction_internal(apparent_altitude_deg, temperature_c, pressure_hpa) * 60.0
     }
 
     pub fn correct_for_refraction(
@@ -81,7 +280,7 @@ impl OpticalSimulator {
         pressure_hpa: f64,
     ) -> f64 {
         let mut apparent = true_altitude_deg;
-        for _ in 0..5 {
+        for _ in 0..8 {
             let refr = self.calculate_atmospheric_refraction(apparent, temperature_c, pressure_hpa);
             apparent = true_altitude_deg + refr;
         }
@@ -90,7 +289,11 @@ impl OpticalSimulator {
 
     pub fn earth_curvature_correction(&self, shadow_length_chi: f64) -> f64 {
         let s_km = shadow_length_chi * 0.3333 / 1000.0;
-        let delta_h_km = EARTH_RADIUS_KM - (EARTH_RADIUS_KM.powi(2) - s_km.powi(2)).sqrt();
+        if s_km <= 0.0 {
+            return 0.0;
+        }
+        let ratio = (s_km / EARTH_RADIUS_KM).min(0.999);
+        let delta_h_km = EARTH_RADIUS_KM * (1.0 - (1.0 - ratio.powi(2)).sqrt());
         delta_h_km * 1000.0 / 0.3333
     }
 
@@ -275,6 +478,25 @@ mod tests {
         let refr = sim.calculate_atmospheric_refraction(30.0, 15.0, 1013.25);
         assert!(refr > 0.000001);
         assert!(refr < 0.1);
+    }
+
+    #[test]
+    fn test_layered_refraction_low_altitude() {
+        let sim = OpticalSimulator::new(34.49, 113.09, 420.0);
+        let h = 1.0;
+        let standard = sim.calculate_atmospheric_refraction_standard(h, 10.0, 1013.0, 50.0);
+        let layered = sim.layered_atmospheric_refraction(h, 10.0, 1013.0, 50.0, None);
+        assert!(layered > standard, "分层模型在低高度角应修正更多: {} vs {}", layered, standard);
+        assert!(layered < 1.0);
+    }
+
+    #[test]
+    fn test_lapse_rate_effect() {
+        let sim = OpticalSimulator::new(34.49, 113.09, 420.0);
+        let h = 2.0;
+        let inversion = sim.layered_atmospheric_refraction(h, 5.0, 1013.0, 60.0, Some(0.005));
+        let standard = sim.layered_atmospheric_refraction(h, 5.0, 1013.0, 60.0, Some(LAPSE_RATE_STANDARD));
+        assert!(inversion > standard, "逆温层应增大蒙气差: {} vs {}", inversion, standard);
     }
 
     #[test]
