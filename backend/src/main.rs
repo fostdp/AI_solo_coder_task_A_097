@@ -79,6 +79,9 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    guibiao_backend::metrics::init();
+    tracing::info!("Prometheus 指标已注册，端点: /metrics");
+
     let (dtu_cfg, analyzer_cfg, alarm_cfg) = load_all_configs();
     tracing::info!(
         "告警配置: 阈值={}寸, 去抖={}s, 分级倍数: WARNING≥{}× CRITICAL≥{}×",

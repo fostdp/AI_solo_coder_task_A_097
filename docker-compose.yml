@@ -1,0 +1,95 @@
+version: "3.8"
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1-alpine
+    container_name: guibiao-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+    environment:
+      CLICKHOUSE_DB: guibiao
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - guibiao-net
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: guibiao-mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+    networks:
+      - guibiao-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: guibiao-backend
+    ports:
+      - "3000:3000"
+    environment:
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_DB: guibiao
+      SERVER_PORT: "3000"
+      RUST_LOG: "guibiao_backend=info,tower_http=info"
+      GUIBIAO_CONFIG_DIR: /app/config
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - guibiao-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: guibiao-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - guibiao-net
+
+  simulator:
+    build:
+      context: ./sensor_simulator
+      dockerfile: Dockerfile
+    container_name: guibiao-simulator
+    environment:
+      - SIMULATOR_CONFIG=/app/config.yaml
+    volumes:
+      - ./sensor_simulator/config.yaml:/app/config.yaml:ro
+    depends_on:
+      - backend
+      - mosquitto
+    networks:
+      - guibiao-net
+    profiles:
+      - simulator
+
+volumes:
+  ch-data:
+    driver: local
+  mqtt-data:
+    driver: local
+
+networks:
+  guibiao-net:
+    driver: bridge

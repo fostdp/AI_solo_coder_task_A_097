@@ -71,6 +71,7 @@ pub fn create_router(state: HttpAppState) -> Router {
         .route("/api/analyze/monte-carlo", post(run_monte_carlo))
         .route("/api/alerts", get(get_alerts))
         .route("/api/solstice/:year", get(get_winter_solstice))
+        .route("/metrics", get(crate::metrics::metrics_handler))
         .route("/ws", get(|ws: WebSocketUpgrade, State(s): State<HttpAppState>| async move {
             crate::alarm_ws::ws_handler(ws, s.alarm).await
         }))
@@ -166,6 +167,10 @@ async fn post_measurement(
         return Json(ApiResponse::err(&format!("校验失败: {}", e)));
     }
 
+    crate::metrics::MEASUREMENTS_RECEIVED
+        .with_label_values(&[&measurement.station_id])
+        .inc();
+
     if let Err(e) = state.store.insert_measurement(&measurement).await {
         tracing::error!("测量数据入库失败: {}", e);
     }
@@ -190,6 +195,10 @@ async fn post_measurement(
         tracing::error!("仿真结果入库失败: {}", e);
     }
 
+    crate::metrics::SIMULATIONS_RUN
+        .with_label_values(&[&measurement.station_id])
+        .inc();
+
     if let Some(alert) = state
         .alarm
         .evaluate(&measurement, simulation.refracted_shadow_length)
@@ -200,6 +209,9 @@ async fn post_measurement(
         }
         let ws_alert = crate::models::WsMessage::alert(&alert);
         state.alarm.broadcast_message(ws_alert).await;
+        crate::metrics::ALERTS_GENERATED
+            .with_label_values(&[alert.alert_level.as_str()])
+            .inc();
     }
 
     let ws_meas = crate::models::WsMessage::measurement(&measurement);
@@ -239,7 +251,12 @@ async fn run_monte_carlo(
     Json(config): Json<MonteCarloConfig>,
 ) -> Json<ApiResponse<MonteCarloResult>> {
     match state.analyzer.analyze_from_store(config).await {
-        Ok(result) => Json(ApiResponse::ok(result)),
+        Ok(result) => {
+            crate::metrics::MC_ANALYSES_RUN
+                .with_label_values(&[&result.station_id])
+                .inc();
+            Json(ApiResponse::ok(result))
+        }
         Err(e) => Json(ApiResponse::err(&e.to_string())),
     }
 }

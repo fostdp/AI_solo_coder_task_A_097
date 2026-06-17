@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS sensor_measurements (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(measurement_time)
 ORDER BY (station_id, measurement_time)
-TTL measurement_time + INTERVAL 1 YEAR
+TTL measurement_time + INTERVAL 90 DAY
 COMMENT '圭表传感器每分钟测量数据表';
 
 -- ============================================================
@@ -212,3 +212,64 @@ CREATE TABLE IF NOT EXISTS hourly_stats (
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(hour_start)
 ORDER BY (station_id, hour_start);
+
+-- ============================================================
+-- 6. 日降采样统计表（从小时聚合再聚合为日级）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS daily_stats (
+    station_id String,
+    day_start Date COMMENT '日期',
+    measurement_count UInt64,
+    avg_shadow_length Float64,
+    min_shadow_length Float64,
+    max_shadow_length Float64,
+    avg_sun_altitude Float64,
+    max_sun_altitude Float64,
+    avg_temperature Float64,
+    alert_count UInt64 DEFAULT 0
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(day_start)
+ORDER BY (station_id, day_start)
+TTL day_start + INTERVAL 3 YEAR
+COMMENT '日级降采样统计表，保留3年';
+
+-- ============================================================
+-- 日降采样物化视图：小时→日聚合
+-- ============================================================
+CREATE MATERIALIZED VIEW IF NOT EXISTS daily_stats_mv
+TO daily_stats
+AS
+SELECT
+    station_id,
+    toDate(hour_start) AS day_start,
+    sum(measurement_count) AS measurement_count,
+    avg(avg_shadow_length) AS avg_shadow_length,
+    min(min_shadow_length) AS min_shadow_length,
+    max(max_shadow_length) AS max_shadow_length,
+    avg(avg_sun_altitude) AS avg_sun_altitude,
+    max(max_sun_altitude) AS max_sun_altitude,
+    avg(avg_temperature) AS avg_temperature,
+    0 AS alert_count
+FROM hourly_stats
+GROUP BY station_id, day_start;
+
+-- ============================================================
+-- 仿真结果保留策略：6个月后移至冷存储分区
+-- ============================================================
+ALTER TABLE optical_simulations MODIFY TTL simulation_time + INTERVAL 180 DAY;
+
+-- ============================================================
+-- 告警事件保留策略：1年
+-- ============================================================
+ALTER TABLE alert_events MODIFY TTL alert_time + INTERVAL 1 YEAR;
+
+-- ============================================================
+-- 蒙特卡洛分析结果保留：2年
+-- ============================================================
+ALTER TABLE monte_carlo_analysis MODIFY TTL analysis_time + INTERVAL 2 YEAR;
+
+-- ============================================================
+-- 小时统计保留：6个月
+-- ============================================================
+ALTER TABLE hourly_stats MODIFY TTL hour_start + INTERVAL 180 DAY;

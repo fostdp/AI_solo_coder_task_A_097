@@ -2,6 +2,7 @@ pub mod alarm_ws;
 pub mod dtu_receiver;
 pub mod error_analyzer;
 pub mod handlers;
+pub mod metrics;
 pub mod models;
 pub mod monte_carlo;
 pub mod optics;

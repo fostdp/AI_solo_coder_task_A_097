@@ -1,0 +1,33 @@
+station_id: "dengfeng_001"
+station_name: "登封观星台元代圭表"
+latitude: 34.4897
+longitude: 113.0875
+altitude: 420.0
+gauge_height: 40.0
+
+mode: "realtime"
+
+atmosphere:
+  temperature_base: 5.0
+  temperature_amplitude: 10.0
+  temperature_noise_std: 0.5
+  pressure_base: 1013.25
+  pressure_noise_std: 2.0
+  humidity_base: 50.0
+  humidity_amplitude: 20.0
+  humidity_noise_std: 3.0
+
+altitude_override:
+
+error_injection:
+  gauge_height_noise_std: 0.005
+  shadow_length_noise_std_ratio: 0.005
+
+interval_seconds: 3
+count: 0
+
+output:
+  http_url: "http://backend:3000"
+  mqtt_broker: "mqtt://mosquitto:1883"
+  mqtt_topic: "guibiao/sensor/{station_id}"
+  mqtt_enabled: true
