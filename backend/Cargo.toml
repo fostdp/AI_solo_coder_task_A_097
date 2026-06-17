@@ -1,0 +1,26 @@
+[package]
+name = "guibiao-backend"
+version = "1.0.0"
+edition = "2021"
+description = "古代圭表测影光学仿真与冬至时刻精度分析系统 - Rust后端"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_with = "3.4"
+chrono = { version = "0.4", features = ["serde"] }
+clickhouse = { version = "0.11", features = ["tokio"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+rand = "0.8"
+rand_distr = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+anyhow = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true
